@@ -1,0 +1,108 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag / branch / sha of the private source repo"
+        required: true
+        default: main
+      version:
+        description: "Version, e.g. 0.2.1"
+        required: true
+      channel:
+        description: "Build channel"
+        required: true
+        default: dev
+        type: choice
+        options: [dev, stable]
+
+permissions:
+  contents: write
+
+env:
+  GODOT_VERSION: 4.7.2
+  GODOT_RELEASE: 4.7.2-stable
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]] || { echo "Invalid version"; exit 1; }
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: feiandxs/realmfarers
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.PRIVATE_REPO_SSH_KEY }}
+          path: src
+          persist-credentials: false
+
+      - name: Cache Godot
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/godot-dl
+          key: godot-${{ env.GODOT_RELEASE }}
+
+      - name: Download Godot and export templates
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/godot-dl && cd ~/godot-dl
+          base="https://github.com/godotengine/godot-builds/releases/download/${GODOT_RELEASE}"
+          curl -fsSL -o godot.zip "$base/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          curl -fsSL -o templates.tpz "$base/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+
+      - name: Install Godot
+        run: |
+          cd ~/godot-dl
+          unzip -qo godot.zip
+          mv -f "Godot_v${GODOT_RELEASE}_linux.x86_64" ~/godot
+          tdir=~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          mkdir -p "$tdir"
+          unzip -qo templates.tpz -d ~/tpl
+          mv ~/tpl/templates/* "$tdir"/
+
+      - name: Inject version and channel
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          cd src/game
+          sed -i '/^config\/version=/d' project.godot
+          sed -i "s/^\[application\]$/[application]\n\nconfig\/version=\"${VERSION}\"/" project.godot
+          printf '\n[realmfarers]\n\nbuild_channel="%s"\n' "$CHANNEL" >> project.godot
+
+      - name: Import
+        run: ~/godot --headless --path src/game --import 2>&1 | tail -n 20
+
+      - name: Export
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+          mkdir -p src/build/windows src/build/linux src/build/macos out
+          ~/godot --headless --path src/game --export-release "Windows Desktop" ../build/windows/Realmfarers.exe
+          ~/godot --headless --path src/game --export-release "Linux" ../build/linux/Realmfarers.x86_64
+          ~/godot --headless --path src/game --export-release "macOS" ../build/macos/Realmfarers.zip
+          (cd src/build/windows && zip -qr "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-windows.zip" .)
+          (cd src/build/linux && chmod +x Realmfarers.x86_64 && zip -qr "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-linux.zip" .)
+          mv src/build/macos/Realmfarers.zip "out/Realmfarers-${VERSION}-macos.zip"
+          ls -l out
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          REF: ${{ inputs.ref }}
+        run: |
+          if [ "$CHANNEL" = stable ]; then tag="v${VERSION}"; pre=""; else tag="v${VERSION}-dev"; pre="--prerelease"; fi
+          gh release create "$tag" out/*.zip --repo "$GITHUB_REPOSITORY" --draft $pre \
+            --target "$GITHUB_SHA" --title "Realmfarers $tag" \
+            --notes "Realmfarers ${VERSION} (${CHANNEL} build)."
