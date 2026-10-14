@@ -26,7 +26,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Validate inputs
         env:
@@ -35,7 +35,7 @@ jobs:
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]] || { echo "Invalid version"; exit 1; }
 
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: feiandxs/realmfarers
           ref: ${{ inputs.ref }}
@@ -45,7 +45,7 @@ jobs:
 
       - name: Cache Godot
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/godot-dl
           key: godot-${{ env.GODOT_RELEASE }}
@@ -77,6 +77,8 @@ jobs:
           sed -i '/^config\/version=/d' project.godot
           sed -i "s/^\[application\]$/[application]\n\nconfig\/version=\"${VERSION}\"/" project.godot
           printf '\n[realmfarers]\n\nbuild_channel="%s"\n' "$CHANNEL" >> project.godot
+          # The game reads its version from res://version.json (also shipped inside update packs)
+          printf '{"version":"%s","channel":"%s"}\n' "$VERSION" "$CHANNEL" > version.json
 
       - name: Import
         run: ~/godot --headless --path src/game --import 2>&1 | tail -n 20
@@ -93,7 +95,26 @@ jobs:
           (cd src/build/windows && zip -qr "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-windows.zip" .)
           (cd src/build/linux && chmod +x Realmfarers.x86_64 && zip -qr "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-linux.zip" .)
           mv src/build/macos/Realmfarers.zip "out/Realmfarers-${VERSION}-macos.zip"
+          # Content packs for in-game self-update (one per platform: texture formats differ)
+          ~/godot --headless --path src/game --export-pack "Windows Desktop" "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-windows.pck"
+          ~/godot --headless --path src/game --export-pack "Linux" "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-linux.pck"
+          ~/godot --headless --path src/game --export-pack "macOS" "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-macos.pck"
           ls -l out
+
+      - name: Write manifest
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          jq -n --arg v "$VERSION" --arg c "$CHANNEL" --arg g "$GODOT_VERSION" '{
+            version: $v, channel: $c, godot: $g,
+            packs: {
+              windows: "Realmfarers-\($v)-windows.pck",
+              linux: "Realmfarers-\($v)-linux.pck",
+              macos: "Realmfarers-\($v)-macos.pck"
+            }
+          }' > out/manifest.json
+          cat out/manifest.json
 
       - name: Create draft release
         env:
@@ -103,6 +124,6 @@ jobs:
           REF: ${{ inputs.ref }}
         run: |
           if [ "$CHANNEL" = stable ]; then tag="v${VERSION}"; pre=""; else tag="v${VERSION}-dev"; pre="--prerelease"; fi
-          gh release create "$tag" out/*.zip --repo "$GITHUB_REPOSITORY" --draft $pre \
+          gh release create "$tag" out/*.zip out/*.pck out/manifest.json --repo "$GITHUB_REPOSITORY" --draft $pre \
             --target "$GITHUB_SHA" --title "Realmfarers $tag" \
             --notes "Realmfarers ${VERSION} (${CHANNEL} build)."
