@@ -79,6 +79,14 @@ jobs:
           printf '\n[realmfarers]\n\nbuild_channel="%s"\n' "$CHANNEL" >> project.godot
           # The game reads its version from res://version.json (also shipped inside update packs)
           printf '{"version":"%s","channel":"%s"}\n' "$VERSION" "$CHANNEL" > version.json
+          # Dev builds are named "Realmfarers Dev": app / window title / exe metadata come from config/name,
+          # and so does the user data dir, so a dev install keeps its own user://updates and never shares
+          # update packs with a stable install on the same machine (boot.gd does not filter packs by channel).
+          if [ "$CHANNEL" = dev ]; then
+            sed -i 's/^config\/name=.*/config\/name="Realmfarers Dev"/' project.godot
+            sed -i 's/^application\/bundle_identifier=.*/application\/bundle_identifier="io.github.feiandxs.realmfarers.dev"/' export_presets.cfg
+          fi
+          grep -n '^config/name=' project.godot
 
       - name: Import
         run: ~/godot --headless --path src/game --import 2>&1 | tail -n 20
@@ -86,16 +94,23 @@ jobs:
       - name: Export
         env:
           VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
           set -e
+          # dev: "Realmfarers Dev.app" / "Realmfarers Dev.exe" / Realmfarers-Dev.x86_64, zips Realmfarers-Dev-<ver>-<platform>.zip
+          # stable: Realmfarers.app / Realmfarers.exe / Realmfarers.x86_64, zips Realmfarers-<ver>-<platform>.zip
+          if [ "$CHANNEL" = dev ]; then app="Realmfarers Dev"; bin="Realmfarers-Dev"; zip="Realmfarers-Dev-${VERSION}"
+          else app="Realmfarers"; bin="Realmfarers"; zip="Realmfarers-${VERSION}"; fi
           mkdir -p src/build/windows src/build/linux src/build/macos out
-          ~/godot --headless --path src/game --export-release "Windows Desktop" ../build/windows/Realmfarers.exe
-          ~/godot --headless --path src/game --export-release "Linux" ../build/linux/Realmfarers.x86_64
+          ~/godot --headless --path src/game --export-release "Windows Desktop" "../build/windows/${app}.exe"
+          ~/godot --headless --path src/game --export-release "Linux" "../build/linux/${bin}.x86_64"
+          # The .app name inside the macOS zip comes from config/name
           ~/godot --headless --path src/game --export-release "macOS" ../build/macos/Realmfarers.zip
-          (cd src/build/windows && zip -qr "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-windows.zip" .)
-          (cd src/build/linux && chmod +x Realmfarers.x86_64 && zip -qr "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-linux.zip" .)
-          mv src/build/macos/Realmfarers.zip "out/Realmfarers-${VERSION}-macos.zip"
-          # Content packs for in-game self-update (one per platform: texture formats differ)
+          (cd src/build/windows && zip -qr "$GITHUB_WORKSPACE/out/${zip}-windows.zip" .)
+          (cd src/build/linux && chmod +x "${bin}.x86_64" && zip -qr "$GITHUB_WORKSPACE/out/${zip}-linux.zip" .)
+          mv src/build/macos/Realmfarers.zip "out/${zip}-macos.zip"
+          # Content packs for in-game self-update (one per platform: texture formats differ).
+          # Names stay Realmfarers-<ver>-<platform>.pck on both channels (manifest packs[] / old clients).
           ~/godot --headless --path src/game --export-pack "Windows Desktop" "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-windows.pck"
           ~/godot --headless --path src/game --export-pack "Linux" "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-linux.pck"
           ~/godot --headless --path src/game --export-pack "macOS" "$GITHUB_WORKSPACE/out/Realmfarers-${VERSION}-macos.pck"
