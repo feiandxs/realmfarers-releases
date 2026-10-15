@@ -106,13 +106,23 @@ jobs:
           VERSION: ${{ inputs.version }}
           CHANNEL: ${{ inputs.channel }}
         run: |
-          jq -n --arg v "$VERSION" --arg c "$CHANNEL" --arg g "$GODOT_VERSION" '{
+          set -euo pipefail
+          # packs stays "platform -> file name" (0.2.4 and older clients read it that way);
+          # sizes / sha256 are new: the updater verifies the pack before installing it.
+          args=()
+          for p in windows linux macos; do
+            f="out/Realmfarers-${VERSION}-${p}.pck"
+            args+=(--arg "size_$p" "$(stat -c %s "$f")" --arg "sha_$p" "$(sha256sum "$f" | cut -d' ' -f1)")
+          done
+          jq -n --arg v "$VERSION" --arg c "$CHANNEL" --arg g "$GODOT_VERSION" "${args[@]}" '{
             version: $v, channel: $c, godot: $g,
             packs: {
               windows: "Realmfarers-\($v)-windows.pck",
               linux: "Realmfarers-\($v)-linux.pck",
               macos: "Realmfarers-\($v)-macos.pck"
-            }
+            },
+            sizes: {windows: ($size_windows|tonumber), linux: ($size_linux|tonumber), macos: ($size_macos|tonumber)},
+            sha256: {windows: $sha_windows, linux: $sha_linux, macos: $sha_macos}
           }' > out/manifest.json
           cat out/manifest.json
 

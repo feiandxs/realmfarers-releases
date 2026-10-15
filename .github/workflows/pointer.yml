@@ -1,0 +1,67 @@
+name: Update pointer
+
+# Keeps latest-dev.json / latest-stable.json on the fixed release "update-pointer" up to date.
+# The in-game updater reads these via the release download URL (CDN, not the rate-limited API).
+# Runs only when a release is *published* (drafts never trigger it), so drafts stay invisible.
+# A pointer file = that release's manifest.json + tag / page / assets_base / notes.
+# dev pointer follows prereleases and stable releases; stable pointer follows stable releases only.
+# A pointer never moves backwards (re-publishing an older release does nothing).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)point to, e.g. v0.2.5-dev"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-pointer
+  cancel-in-progress: false
+
+jobs:
+  pointer:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Update pointer files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          POINTER=update-pointer
+          [ "$TAG" = "$POINTER" ] && { echo "pointer release itself, skip"; exit 0; }
+          info=$(gh release view "$TAG" --repo "$REPO" --json tagName,isPrerelease,isDraft,body,url)
+          [ "$(jq -r .isDraft <<<"$info")" = true ] && { echo "draft, skip"; exit 0; }
+          mkdir -p m
+          gh release download "$TAG" --repo "$REPO" -p manifest.json -D m || { echo "no manifest.json, skip"; exit 0; }
+          ver=$(jq -r .version m/manifest.json)
+          jq --arg tag "$TAG" --arg page "$(jq -r .url <<<"$info")" --arg notes "$(jq -r .body <<<"$info")" \
+             --arg base "https://github.com/$REPO/releases/download/$TAG/" \
+             '. + {tag: $tag, page: $page, assets_base: $base, notes: $notes}' m/manifest.json > pointer.json
+          cat pointer.json
+          if ! gh release view "$POINTER" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$POINTER" --repo "$REPO" --prerelease --title "Update pointer (do not delete)" \
+              --notes "Maintained by the update-pointer workflow: latest-dev.json / latest-stable.json for the in-game updater."
+          fi
+          if [ "$(jq -r .isPrerelease <<<"$info")" = true ]; then channels="dev"; else channels="dev stable"; fi
+          for ch in $channels; do
+            f="latest-$ch.json"
+            rm -f "cur-$f"
+            if gh release download "$POINTER" --repo "$REPO" -p "$f" -O "cur-$f" 2>/dev/null; then
+              cur=$(jq -r .version "cur-$f")
+              newest=$(printf '%s\n%s\n' "$cur" "$ver" | sort -V | tail -n1)
+              if [ "$cur" = "$ver" ] || [ "$newest" != "$ver" ]; then
+                echo "$f already at $cur (>= $ver), keep"
+                continue
+              fi
+            fi
+            cp pointer.json "$f"
+            gh release upload "$POINTER" "$f" --repo "$REPO" --clobber
+            echo "$f -> $ver ($TAG)"
+          done
