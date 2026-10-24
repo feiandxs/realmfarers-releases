@@ -41,6 +41,7 @@ jobs:
           ref: ${{ inputs.ref }}
           ssh-key: ${{ secrets.PRIVATE_REPO_SSH_KEY }}
           path: src
+          lfs: true
           persist-credentials: false
 
       - name: Cache Godot
